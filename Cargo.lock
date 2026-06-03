@@ -1482,7 +1482,7 @@ dependencies = [
 
 [[package]]
 name = "thirdpass-ansible"
-version = "1.1.2"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "glob",
@@ -1503,7 +1503,7 @@ dependencies = [
 
 [[package]]
 name = "thirdpass-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "env_logger",

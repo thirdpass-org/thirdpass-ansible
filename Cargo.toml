@@ -1,6 +1,6 @@
 [package]
 name = "thirdpass-ansible"
-version = "1.1.2"
+version = "2.0.0"
 authors = ["rndhouse <rndhouse@protonmail.com>"]
 edition = "2018"
 repository = "https://github.com/thirdpass-org/thirdpass-ansible"
@@ -16,7 +16,7 @@ name = "thirdpass-ansible"
 path = "src/bin.rs"
 
 [dependencies]
-thirdpass-core = { path = "../../thirdpass/thirdpass-core", version = "0.4.0" }
+thirdpass-core = { path = "../../thirdpass/thirdpass-core", version = "0.5.0" }
 
 anyhow = "1.0.31"
 structopt = "0.3.14"
