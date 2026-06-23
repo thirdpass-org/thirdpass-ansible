@@ -3,6 +3,7 @@ use std::io::Read;
 use strum::IntoEnumIterator;
 
 mod galaxy;
+mod resolver;
 
 #[derive(Clone, Debug)]
 pub struct AnsibleExtension {
@@ -36,11 +37,11 @@ impl thirdpass_core::extension::Extension for AnsibleExtension {
     /// Returns one package dependencies structure per registry.
     fn identify_package_dependencies(
         &self,
-        _package_name: &str,
-        _package_version: &Option<&str>,
+        package_name: &str,
+        package_version: &Option<&str>,
         _extension_args: &[String],
     ) -> Result<Vec<thirdpass_core::extension::PackageDependencies>> {
-        Err(format_err!("Function unimplemented."))
+        resolver::identify_package_dependencies(package_name, package_version)
     }
 
     fn identify_file_defined_dependencies(
@@ -116,10 +117,10 @@ impl thirdpass_core::extension::Extension for AnsibleExtension {
 
 /// Given package name, return latest version.
 fn get_latest_version(package_name: &str) -> Result<Option<String>> {
-    let json = get_registry_versions_json(package_name)?;
-    latest_version_from_versions_json(&json).map(Some)
+    resolver::latest_version(package_name).map(Some)
 }
 
+#[cfg(test)]
 fn latest_version_from_versions_json(json: &serde_json::Value) -> Result<String> {
     let version_entries = json["data"]
         .as_array()
@@ -160,18 +161,30 @@ fn get_registry_human_url(extension: &AnsibleExtension, package_name: &str) -> R
     Ok(url::Url::parse(url.as_str())?)
 }
 
-fn get_registry_versions_json(package_name: &str) -> Result<serde_json::Value> {
+fn get_registry_versions_url(package_name: &str) -> Result<String> {
     let package_name = package_name.replace(".", "/");
     let handlebars_registry = handlebars::Handlebars::new();
-    let json_url = handlebars_registry.render_template(
+    Ok(handlebars_registry.render_template(
         "https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/{{package_name}}/versions/",
         &maplit::btreemap! {"package_name" => package_name},
-    )?;
-
-    get_registry_json(&json_url)
+    )?)
 }
 
-fn get_registry_entry_json(package_name: &str, package_version: &str) -> Result<serde_json::Value> {
+pub(crate) fn get_registry_versions(package_name: &str) -> Result<Vec<String>> {
+    let mut versions = Vec::new();
+    let mut next_url = Some(get_registry_versions_url(package_name)?);
+    while let Some(url) = next_url {
+        let json = get_registry_json(&url)?;
+        versions.extend(versions_from_versions_json(&json)?);
+        next_url = next_versions_url(&json)?;
+    }
+    Ok(versions)
+}
+
+pub(crate) fn get_registry_entry_json(
+    package_name: &str,
+    package_version: &str,
+) -> Result<serde_json::Value> {
     let package_name = package_name.replace(".", "/");
     let handlebars_registry = handlebars::Handlebars::new();
     let json_url = handlebars_registry.render_template(
@@ -180,6 +193,32 @@ fn get_registry_entry_json(package_name: &str, package_version: &str) -> Result<
     )?;
 
     get_registry_json(&json_url)
+}
+
+fn versions_from_versions_json(json: &serde_json::Value) -> Result<Vec<String>> {
+    let version_entries = json["data"]
+        .as_array()
+        .ok_or(format_err!("Failed to find data JSON section."))?;
+    let mut versions = Vec::new();
+    for version_entry in version_entries {
+        let version = version_entry["version"]
+            .as_str()
+            .ok_or(format_err!("Failed to parse version as str."))?;
+        versions.push(version.to_string());
+    }
+    Ok(versions)
+}
+
+fn next_versions_url(json: &serde_json::Value) -> Result<Option<String>> {
+    let next = match json["links"]["next"].as_str() {
+        Some(next) => next,
+        None => return Ok(None),
+    };
+    if next.starts_with("http://") || next.starts_with("https://") {
+        Ok(Some(next.to_string()))
+    } else {
+        Ok(Some(format!("https://galaxy.ansible.com{}", next)))
+    }
 }
 
 fn get_registry_json(json_url: &str) -> Result<serde_json::Value> {

@@ -100,7 +100,7 @@ fn test_select_latest_equal_comparator() -> Result<()> {
     Ok(())
 }
 
-fn normalize_version(version: &str) -> Result<String> {
+pub(crate) fn normalize_version(version: &str) -> Result<String> {
     let mut split = version.split("-");
     let prefix = split
         .next()
