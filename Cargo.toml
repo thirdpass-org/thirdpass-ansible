@@ -19,6 +19,7 @@ path = "src/bin.rs"
 thirdpass-core = { path = "../../thirdpass/thirdpass-core", version = "0.5.0" }
 
 anyhow = "1.0.31"
+log = "0.4"
 structopt = "0.3.14"
 strum = "0.20.0"
 strum_macros = "0.20.1"

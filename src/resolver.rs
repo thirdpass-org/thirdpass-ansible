@@ -6,6 +6,7 @@
 //! to avoid cycles.
 
 use anyhow::{format_err, Context, Result};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Resolve package dependencies for one Ansible Galaxy collection release.
@@ -13,7 +14,7 @@ pub(crate) fn identify_package_dependencies(
     package_name: &str,
     package_version: &Option<&str>,
 ) -> Result<Vec<thirdpass_core::extension::PackageDependencies>> {
-    let source = HttpGalaxySource;
+    let source = CachedGalaxySource::new(HttpGalaxySource);
     let dependencies =
         identify_package_dependencies_with_source(&source, package_name, package_version)?;
     Ok(vec![dependencies])
@@ -21,8 +22,8 @@ pub(crate) fn identify_package_dependencies(
 
 /// Resolve the latest Galaxy version for a collection.
 pub(crate) fn latest_version(package_name: &str) -> Result<String> {
-    let source = HttpGalaxySource;
-    select_latest_version(&source.package_versions(package_name)?)
+    let source = CachedGalaxySource::new(HttpGalaxySource);
+    crate::version::select_latest_version(&source.package_versions(package_name)?)
 }
 
 trait GalaxySource {
@@ -48,6 +49,54 @@ impl GalaxySource for HttpGalaxySource {
     }
 }
 
+struct CachedGalaxySource<T> {
+    source: T,
+    entries: RefCell<BTreeMap<PackageKey, serde_json::Value>>,
+    versions: RefCell<BTreeMap<String, Vec<String>>>,
+}
+
+impl<T> CachedGalaxySource<T> {
+    fn new(source: T) -> Self {
+        Self {
+            source,
+            entries: RefCell::new(BTreeMap::new()),
+            versions: RefCell::new(BTreeMap::new()),
+        }
+    }
+}
+
+impl<T: GalaxySource> GalaxySource for CachedGalaxySource<T> {
+    fn package_entry(
+        &self,
+        package_name: &str,
+        package_version: &str,
+    ) -> Result<serde_json::Value> {
+        let key = PackageKey {
+            name: package_name.to_string(),
+            version: package_version.to_string(),
+        };
+        if let Some(entry) = self.entries.borrow().get(&key).cloned() {
+            return Ok(entry);
+        }
+
+        let entry = self.source.package_entry(package_name, package_version)?;
+        self.entries.borrow_mut().insert(key, entry.clone());
+        Ok(entry)
+    }
+
+    fn package_versions(&self, package_name: &str) -> Result<Vec<String>> {
+        if let Some(versions) = self.versions.borrow().get(package_name).cloned() {
+            return Ok(versions);
+        }
+
+        let versions = self.source.package_versions(package_name)?;
+        self.versions
+            .borrow_mut()
+            .insert(package_name.to_string(), versions.clone());
+        Ok(versions)
+    }
+}
+
 fn identify_package_dependencies_with_source(
     source: &dyn GalaxySource,
     package_name: &str,
@@ -55,7 +104,7 @@ fn identify_package_dependencies_with_source(
 ) -> Result<thirdpass_core::extension::PackageDependencies> {
     let package_version = match package_version {
         Some(version) => version.to_string(),
-        None => select_latest_version(&source.package_versions(package_name)?)?,
+        None => crate::version::select_latest_version(&source.package_versions(package_name)?)?,
     };
     let dependencies = resolve_dependency_closure(source, package_name, &package_version)?;
 
@@ -152,106 +201,14 @@ fn resolve_requirement(
     package_name: &str,
     requirement: &str,
 ) -> Result<String> {
-    let version_req = parse_version_requirement(requirement)?;
+    let version_req = crate::version::parse_version_requirement(requirement)?;
     let versions = source.package_versions(package_name)?;
-    select_latest_matching_version(&versions, &version_req).with_context(|| {
+    crate::version::select_latest_matching_version(&versions, &version_req).with_context(|| {
         format!(
             "Failed to resolve dependency {} with requirement {}.",
             package_name, requirement
         )
     })
-}
-
-fn parse_version_requirement(requirement: &str) -> Result<semver::VersionReq> {
-    let requirement = normalize_version_requirement(requirement)?;
-    semver::VersionReq::parse(&requirement).context(format!(
-        "Failed to parse collection dependency requirement: {}",
-        requirement
-    ))
-}
-
-fn normalize_version_requirement(requirement: &str) -> Result<String> {
-    let requirement = requirement.trim();
-    if requirement.is_empty() || requirement == "*" {
-        return Ok("*".to_string());
-    }
-
-    let mut comparators = Vec::new();
-    for comparator in requirement.split(',') {
-        comparators.push(normalize_requirement_comparator(comparator.trim())?);
-    }
-    Ok(comparators.join(", "))
-}
-
-fn normalize_requirement_comparator(comparator: &str) -> Result<String> {
-    if comparator.is_empty() || comparator == "*" {
-        return Ok("*".to_string());
-    }
-
-    let (operator, version) = if let Some(version) = comparator.strip_prefix(">=") {
-        (">=", version)
-    } else if let Some(version) = comparator.strip_prefix("<=") {
-        ("<=", version)
-    } else if let Some(version) = comparator.strip_prefix("==") {
-        ("=", version)
-    } else if let Some(version) = comparator.strip_prefix('=') {
-        ("=", version)
-    } else if let Some(version) = comparator.strip_prefix('>') {
-        (">", version)
-    } else if let Some(version) = comparator.strip_prefix('<') {
-        ("<", version)
-    } else if let Some(version) = comparator.strip_prefix('~') {
-        ("~", version)
-    } else if let Some(version) = comparator.strip_prefix('^') {
-        ("^", version)
-    } else {
-        ("", comparator)
-    };
-
-    let version = version.trim();
-    if version == "*" {
-        return Ok("*".to_string());
-    }
-    Ok(format!(
-        "{}{}",
-        operator,
-        crate::galaxy::normalize_version(version)?
-    ))
-}
-
-fn select_latest_version(versions: &[String]) -> Result<String> {
-    let mut versions = parse_versions(versions);
-    versions.sort_by(|left, right| left.0.cmp(&right.0));
-    versions
-        .last()
-        .map(|(_version, original)| original.clone())
-        .ok_or(format_err!("Failed to find latest version."))
-}
-
-fn select_latest_matching_version(
-    versions: &[String],
-    requirement: &semver::VersionReq,
-) -> Result<String> {
-    let mut versions = parse_versions(versions);
-    versions.sort_by(|left, right| left.0.cmp(&right.0));
-    versions
-        .into_iter()
-        .rev()
-        .find(|(version, _original)| requirement.matches(version))
-        .map(|(_version, original)| original)
-        .ok_or(format_err!("Failed to find matching version."))
-}
-
-fn parse_versions(versions: &[String]) -> Vec<(semver::Version, String)> {
-    versions
-        .iter()
-        .filter_map(|version| {
-            crate::galaxy::normalize_version(version)
-                .ok()
-                .and_then(|normalized| semver::Version::parse(&normalized).ok())
-                .map(|parsed| (parsed, version.clone()))
-        })
-        .collect()
 }
 
 #[cfg(test)]
@@ -262,6 +219,8 @@ mod tests {
     struct FakeGalaxySource {
         entries: BTreeMap<PackageKey, serde_json::Value>,
         versions: BTreeMap<String, Vec<String>>,
+        entry_calls: RefCell<BTreeMap<PackageKey, usize>>,
+        version_calls: RefCell<BTreeMap<String, usize>>,
     }
 
     impl FakeGalaxySource {
@@ -283,6 +242,25 @@ mod tests {
                 .or_default()
                 .push(package_version.to_string());
         }
+
+        fn entry_call_count(&self, package_name: &str, package_version: &str) -> usize {
+            self.entry_calls
+                .borrow()
+                .get(&PackageKey {
+                    name: package_name.to_string(),
+                    version: package_version.to_string(),
+                })
+                .copied()
+                .unwrap_or(0)
+        }
+
+        fn version_call_count(&self, package_name: &str) -> usize {
+            self.version_calls
+                .borrow()
+                .get(package_name)
+                .copied()
+                .unwrap_or(0)
+        }
     }
 
     impl GalaxySource for FakeGalaxySource {
@@ -291,20 +269,28 @@ mod tests {
             package_name: &str,
             package_version: &str,
         ) -> Result<serde_json::Value> {
-            self.entries
-                .get(&PackageKey {
-                    name: package_name.to_string(),
-                    version: package_version.to_string(),
-                })
-                .cloned()
-                .ok_or(format_err!(
-                    "missing fake package {}@{}",
-                    package_name,
-                    package_version
-                ))
+            let key = PackageKey {
+                name: package_name.to_string(),
+                version: package_version.to_string(),
+            };
+            *self
+                .entry_calls
+                .borrow_mut()
+                .entry(key.clone())
+                .or_default() += 1;
+            self.entries.get(&key).cloned().ok_or(format_err!(
+                "missing fake package {}@{}",
+                package_name,
+                package_version
+            ))
         }
 
         fn package_versions(&self, package_name: &str) -> Result<Vec<String>> {
+            *self
+                .version_calls
+                .borrow_mut()
+                .entry(package_name.to_string())
+                .or_default() += 1;
             self.versions
                 .get(package_name)
                 .cloned()
@@ -388,26 +374,46 @@ mod tests {
     }
 
     #[test]
-    fn version_requirements_normalize_ansible_syntax() -> Result<()> {
-        let requirement = parse_version_requirement(">= 1.0, ==2.0.0")?;
+    fn package_dependencies_use_cached_galaxy_data() -> Result<()> {
+        let mut source = FakeGalaxySource::default();
+        source.add_package(
+            "example.root",
+            "1.0.0",
+            &[("example.left", ">=1.0.0"), ("example.right", ">=1.0.0")],
+        );
+        source.add_package("example.left", "1.0.0", &[("example.shared", ">=1.0.0")]);
+        source.add_package("example.right", "1.0.0", &[("example.shared", ">=1.0.0")]);
+        source.add_package("example.shared", "1.0.0", &[]);
+        let source = CachedGalaxySource::new(source);
 
-        assert!(requirement.matches(&semver::Version::parse("2.0.0")?));
-        assert!(!requirement.matches(&semver::Version::parse("1.5.0")?));
+        let dependencies =
+            identify_package_dependencies_with_source(&source, "example.root", &Some("1.0.0"))?;
+
+        assert_dependency(&dependencies.dependencies, "example.shared", "1.0.0");
+        assert_eq!(source.source.version_call_count("example.shared"), 1);
+        assert_eq!(source.source.entry_call_count("example.shared", "1.0.0"), 1);
         Ok(())
     }
 
     #[test]
-    fn latest_matching_version_uses_full_candidate_set() -> Result<()> {
-        let versions = vec![
-            "2.0.0".to_string(),
-            "1.5.0".to_string(),
-            "1.2.0".to_string(),
-        ];
-        let requirement = parse_version_requirement("<2.0.0")?;
+    fn dependency_requirements_parse_real_galaxy_metadata_example() -> Result<()> {
+        let entry = serde_json::json!({
+            "version": "5.0.0",
+            "metadata": {
+                "dependencies": {
+                    "ansible.utils": ">=2.7.0"
+                }
+            }
+        });
+
+        let requirements = dependency_requirements(&entry)?;
 
         assert_eq!(
-            select_latest_matching_version(&versions, &requirement)?,
-            "1.5.0"
+            requirements,
+            vec![DependencyRequirement {
+                name: "ansible.utils".to_string(),
+                requirement: ">=2.7.0".to_string()
+            }]
         );
         Ok(())
     }

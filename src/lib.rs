@@ -4,6 +4,7 @@ use strum::IntoEnumIterator;
 
 mod galaxy;
 mod resolver;
+mod version;
 
 #[derive(Clone, Debug)]
 pub struct AnsibleExtension {
@@ -338,6 +339,30 @@ mod tests {
         });
 
         assert_eq!(latest_version_from_versions_json(&json)?, "1.2.0");
+        Ok(())
+    }
+
+    #[test]
+    fn version_page_reads_versions_and_relative_next_link() -> Result<()> {
+        let next_path = "/api/v3/plugin/ansible/content/published/collections/index/example/root/versions/?limit=10&offset=10";
+        let json = serde_json::json!({
+            "data": [
+                { "version": "2.0.0" },
+                { "version": "1.9.0" }
+            ],
+            "links": {
+                "next": next_path
+            }
+        });
+
+        assert_eq!(
+            versions_from_versions_json(&json)?,
+            vec!["2.0.0".to_string(), "1.9.0".to_string()]
+        );
+        assert_eq!(
+            next_versions_url(&json)?,
+            Some(format!("https://galaxy.ansible.com{}", next_path))
+        );
         Ok(())
     }
 

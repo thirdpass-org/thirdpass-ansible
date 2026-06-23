@@ -1487,6 +1487,7 @@ dependencies = [
  "anyhow",
  "glob",
  "handlebars",
+ "log",
  "maplit",
  "regex",
  "reqwest 0.10.10",

@@ -100,40 +100,6 @@ fn test_select_latest_equal_comparator() -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn normalize_version(version: &str) -> Result<String> {
-    let mut split = version.split("-");
-    let prefix = split
-        .next()
-        .ok_or(format_err!("Failed to parse version: {}", version))?;
-    let mut prefix = String::from(prefix);
-
-    let count_periods = prefix.chars().filter(|c| c == &'.').count();
-
-    if count_periods == 0 {
-        prefix += ".0.0";
-    } else if count_periods == 1 {
-        prefix += ".0";
-    }
-
-    for part in split {
-        prefix += "-";
-        prefix += part;
-    }
-    let normalized_version = prefix;
-    Ok(normalized_version)
-}
-
-#[test]
-fn test_normalize_version() -> Result<()> {
-    assert_eq!(normalize_version("0.1")?, "0.1.0".to_string());
-    assert_eq!(
-        normalize_version("0.1-alpha-123")?,
-        "0.1.0-alpha-123".to_string()
-    );
-    assert_eq!(normalize_version("1")?, "1.0.0".to_string());
-    Ok(())
-}
-
 /// Convert a version comparator to a plain version by stripping the operator prefix.
 fn comparator_to_version(comparator: &semver::Comparator) -> Result<semver::Version> {
     let comparator_str = comparator.to_string();
@@ -151,7 +117,7 @@ fn comparator_to_version(comparator: &semver::Comparator) -> Result<semver::Vers
     };
 
     let version_str = comparator_str.trim_start_matches(op_str);
-    let version = normalize_version(version_str)?;
+    let version = crate::version::normalize_version(version_str)?;
     let version = semver::Version::parse(&version);
     Ok(version?)
 }
@@ -199,7 +165,7 @@ pub fn get_manifest_dependencies(
             "Failed to parse version requirement as string."
         ))?;
 
-        let version_requirement = semver::VersionReq::parse(version_requirement)?;
+        let version_requirement = crate::version::parse_version_requirement(version_requirement)?;
         let global_version = global_dependencies
             .get(package_name.as_str())
             .and_then(|f| semver::Version::parse(f.as_str()).ok());
@@ -235,7 +201,7 @@ pub fn get_galaxy_yml_dependencies(
             "Failed to parse version requirement as string."
         ))?;
 
-        let version_requirement = semver::VersionReq::parse(version_requirement)?;
+        let version_requirement = crate::version::parse_version_requirement(version_requirement)?;
         let global_version = global_dependencies
             .get(package_name.as_str())
             .and_then(|f| semver::Version::parse(f.as_str()).ok());
